@@ -42,11 +42,14 @@ typedef struct Output_Node Output_Node;
 vector<Hidden_Node> hidden_nodes(NUMBER_OF_HIDDEN_CELLS);
 vector<Output_Node> output_nodes(NUMBER_OF_OUTPUT_CELLS);
 
-sem_t mutex_readInput, mutex_readyImg;
-sem_t mutex_calcResReady, mutex_readyOutputNodes;
-sem_t mutex_inputLayerConsole, mutex_resultLayerConsole;
-sem_t *mutex_readyHiddenNodes, *mutex_outputLayerReady;
+sem_t semaphore_readInput, semaphore_readyImg;
+sem_t semaphore_calcResReady, semaphore_readyOutputNodes;
+sem_t semaphore_inputLayerConsole, semaphore_resultLayerConsole;
+sem_t *semaphore_readyHiddenNodes, *semaphore_outputLayerReady;
+
 int errCount = 0;// number of incorrect predictions
+int hiddenCellNum;
+
 MNIST_Label lbl;
 FILE *labelFile;
 
@@ -424,21 +427,21 @@ void* readPixelsTestNN(void*){
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
         //wait for hidden cells to calc result based on prev image
-        for(int i = 0; i < 8; ++i)
-            sem_wait(&mutex_readInput); 
+        for(int i = 0; i < hiddenCellNum; ++i)
+            sem_wait(&semaphore_readInput); 
         
         // Reading next image and corresponding label
         img = getImage(imageFile);
         
-        // display progress so first get the console mutex
-        sem_wait(&mutex_inputLayerConsole); 
+        // display progress so first get the console semaphore
+        sem_wait(&semaphore_inputLayerConsole); 
         displayLoadingProgressTesting(imgCount,5,5);
         displayImage(&img, 8,6);
-        sem_post(&mutex_resultLayerConsole); 
+        sem_post(&semaphore_resultLayerConsole); 
         
-        //increment mutext for the hidden cells for number of hidden cells time
-        for(int i = 0; i < 8; ++i)
-            sem_post(&mutex_readyImg);       
+        //increment semaphoret for the hidden cells for number of hidden cells time
+        for(int i = 0; i < hiddenCellNum; ++i)
+            sem_post(&semaphore_readyImg);       
     }
     // Close files
     fclose(imageFile);
@@ -446,18 +449,18 @@ void* readPixelsTestNN(void*){
 
 void* hiddenCellsCalcTestNN(void* arg){
     int threadNum = *((int*)arg);
-    int blockSize = (NUMBER_OF_HIDDEN_CELLS/8);
+    int blockSize = (NUMBER_OF_HIDDEN_CELLS/hiddenCellNum);
 
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){  
         //wait for all 10 output cells to finish their process  
         for(int i = 0; i < 10; ++i)
-            sem_wait(&mutex_outputLayerReady[threadNum]);
+            sem_wait(&semaphore_outputLayerReady[threadNum]);
         //check wheather the new image is ready
-        sem_wait(&mutex_readyImg);
+        sem_wait(&semaphore_readyImg);
         
         // loop through all output cells of the given image this thread is responsible for        
-        for (int j = (threadNum) * blockSize; j <  ((threadNum) * blockSize + blockSize); j++) {
+        for (int j = (threadNum) * blockSize; j <  ((threadNum + 1) * blockSize); j++) {
             hidden_nodes[j].output = 0;
             for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
                 hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
@@ -466,8 +469,8 @@ void* hiddenCellsCalcTestNN(void* arg){
             hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
         }
         for(int i = 0; i < 10; i++){
-            sem_post(&mutex_readyHiddenNodes[i]);}
-        sem_post(&mutex_readInput);
+            sem_post(&semaphore_readyHiddenNodes[i]);}
+        sem_post(&semaphore_readInput);
     }
 }
 
@@ -477,9 +480,9 @@ void* outputLayerTestNN(void* arg){
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
         
-        for(int i = 0; i < 8; i++)        
-           sem_wait(&mutex_readyHiddenNodes[number]);
-        sem_wait(&mutex_calcResReady);
+        for(int i = 0; i < hiddenCellNum; i++)        
+           sem_wait(&semaphore_readyHiddenNodes[number]);
+        sem_wait(&semaphore_calcResReady);
 
         output_nodes[number].output = 0;
         for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
@@ -487,9 +490,9 @@ void* outputLayerTestNN(void* arg){
         }
         output_nodes[number].output += 1/(1+ exp(-1* output_nodes[number].output));
 
-        for(int i = 0; i < 8; ++i)        
-            sem_post(&mutex_outputLayerReady[i]);
-        sem_post(&mutex_readyOutputNodes);
+        for(int i = 0; i < hiddenCellNum; ++i)        
+            sem_post(&semaphore_outputLayerReady[i]);
+        sem_post(&semaphore_readyOutputNodes);
     }
 }
 
@@ -499,18 +502,18 @@ void* calcResultTestNN(void*){
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
         for(int i = 0; i < 10; ++i)
-            sem_wait(&mutex_readyOutputNodes);       
+            sem_wait(&semaphore_readyOutputNodes);       
         lbl = getLabel(labelFile);
         int predictedNum = getNNPrediction();
         if (predictedNum!=lbl) errCount++;
         printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
 
-        sem_wait(&mutex_resultLayerConsole); 
+        sem_wait(&semaphore_resultLayerConsole); 
         displayProgress(imgCount, errCount, 5, 66);
-        sem_post(&mutex_inputLayerConsole);
+        sem_post(&semaphore_inputLayerConsole);
 
         for(int i = 0; i < 10; ++i)    
-           sem_post(&mutex_calcResReady);
+           sem_post(&semaphore_calcResReady);
 
     }
     // Close files
@@ -518,30 +521,30 @@ void* calcResultTestNN(void*){
 }
 
 void testNN(){
-    sem_init(&mutex_readInput, 0, 8);
-    sem_init(&mutex_readyImg, 0, 0);
-    for(int i = 0; i < 8; ++i)
-        sem_init(&mutex_outputLayerReady[i], 0, 10);
+    sem_init(&semaphore_readInput, 0, hiddenCellNum);
+    sem_init(&semaphore_readyImg, 0, 0);
+    for(int i = 0; i < hiddenCellNum; ++i)
+        sem_init(&semaphore_outputLayerReady[i], 0, 10);
     for(int i = 0; i < 10; ++i)
-        sem_init(&mutex_readyHiddenNodes[i], 0, 0);
-    sem_init(&mutex_calcResReady, 0, 10);
-    sem_init(&mutex_readyOutputNodes, 0, 0);
+        sem_init(&semaphore_readyHiddenNodes[i], 0, 0);
+    sem_init(&semaphore_calcResReady, 0, 10);
+    sem_init(&semaphore_readyOutputNodes, 0, 0);
 
-    sem_init(&mutex_inputLayerConsole, 0, 1);
-    sem_init(&mutex_resultLayerConsole, 0, 0);
+    sem_init(&semaphore_inputLayerConsole, 0, 1);
+    sem_init(&semaphore_resultLayerConsole, 0, 0);
     
     // pthread_t readPixelsThread, noronsCalcThread, outputThread, calcResThread;
     pthread_t newThread;
     vector<pthread_t> threads; 
     //pthread_t noronsCalcThreads[8];    
     int temp = 0;
-    int* index1 = (int*)malloc(8 * sizeof(int));
+    int* index1 = (int*)malloc(hiddenCellNum * sizeof(int));
     int* index2 = (int*)malloc(10 * sizeof(int));
 
     pthread_create (&newThread, NULL, readPixelsTestNN, (void*)temp);
     threads.push_back(newThread);
     
-    for(int i = 0; i < 8; i++ ) {
+    for(int i = 0; i < hiddenCellNum; i++ ) {
         index1[i] = i;
         pthread_create(&newThread, NULL, hiddenCellsCalcTestNN, (void *)(index1 + i));
         threads.push_back(newThread);
@@ -562,12 +565,14 @@ void testNN(){
 
 }
 int main(int argc, const char * argv[]) {
+    cout <<"Enter the number of hidden cells please."<<endl;
+    cin >> hiddenCellNum;
 
     // remember the time in order to calculate processing time at the end
     time_t startTime = time(NULL);
 
-    mutex_readyHiddenNodes = (sem_t*) malloc(10 * sizeof(sem_t));
-    mutex_outputLayerReady = (sem_t*) malloc(8 * sizeof(sem_t));
+    semaphore_readyHiddenNodes = (sem_t*) malloc(10 * sizeof(sem_t));
+    semaphore_outputLayerReady = (sem_t*) malloc(hiddenCellNum * sizeof(sem_t));
     
     // clear screen of terminal window
     clearScreen();
