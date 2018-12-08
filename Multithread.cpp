@@ -45,6 +45,7 @@ vector<Output_Node> output_nodes(NUMBER_OF_OUTPUT_CELLS);
 sem_t mutex_readInput, mutex_readyImg, mutex_outputLayerReady, mutex_readyHiddenNodes;
 sem_t mutex_calcResReady, mutex_readyOutputNodes;
 sem_t mutex_inputLayerConsole, mutex_resultLayerConsole;
+vector<sem_t> mutex_noronsCalc;
 int errCount = 0;// number of incorrect predictions
 MNIST_Label lbl;
 FILE *labelFile;
@@ -444,8 +445,8 @@ void* noronsCalcTestNN(void* arg){
     // Loop through all images in the file
     // for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){    
-        sem_wait(&mutex_readyImg);
         sem_wait(&mutex_outputLayerReady);
+        sem_wait(&mutex_readyImg);
         
         // loop through all output cells for the given image        
         for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
@@ -456,8 +457,8 @@ void* noronsCalcTestNN(void* arg){
             hidden_nodes[j].output += hidden_nodes[j].bias;
             hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
         }
-        sem_post(&mutex_readInput);
         sem_post(&mutex_readyHiddenNodes);
+        sem_post(&mutex_readInput);
     }
 }
 
@@ -515,22 +516,30 @@ void testNN(){
     sem_init(&mutex_inputLayerConsole, 0, 1);
     sem_init(&mutex_resultLayerConsole, 0, 0);
 
-    pthread_t readPixelsThread, noronsCalcThread, outputThread, calcResThread;
+    // pthread_t readPixelsThread, noronsCalcThread, outputThread, calcResThread;
+    pthread_t newThread;
+    vector<pthread_t> threads; 
     //pthread_t noronsCalcThreads[8];    
     int temp = 0;
 
-    pthread_create (&readPixelsThread, NULL, readPixelsTestNN, (void*)temp);
-    pthread_create (&noronsCalcThread, NULL, noronsCalcTestNN, (void*)temp);
-    pthread_create (&outputThread, NULL, outputLayerTestNN, (void*)temp);
-    pthread_create (&calcResThread, NULL, calcResultTestNN, (void*)temp);
+    pthread_create (&newThread, NULL, readPixelsTestNN, (void*)temp);
+    threads.push_back(newThread);
+    pthread_create (&newThread, NULL, noronsCalcTestNN, (void*)temp);
+    threads.push_back(newThread);
+    pthread_create (&newThread, NULL, outputLayerTestNN, (void*)temp);
+    threads.push_back(newThread);
+    pthread_create (&newThread, NULL, calcResultTestNN, (void*)temp);
+    threads.push_back(newThread);
 
     // for(int i = 0; i < 8; i++ ) 
     //     pthread_create(&noronsCalcThreads[i], NULL, noronCalcTestNN, (void *)i );
+    for( int i = 0; i< threads.size(); ++i)
+        pthread_join(threads[i], NULL);
 
-    pthread_join(readPixelsThread, NULL);
-    pthread_join(noronsCalcThread, NULL);
-    pthread_join(outputThread, NULL);
-    pthread_join(calcResThread, NULL);
+    // pthread_join(readPixelsThread, NULL);
+    // pthread_join(noronsCalcThread, NULL);
+    // pthread_join(outputThread, NULL);
+    // pthread_join(calcResThread, NULL);
 
     // for(int i = 0; i < 8; i++ ) 
     //     pthread_join(noronsCalcThreads[i], NULL);
