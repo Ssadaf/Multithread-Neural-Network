@@ -42,10 +42,10 @@ typedef struct Output_Node Output_Node;
 vector<Hidden_Node> hidden_nodes(NUMBER_OF_HIDDEN_CELLS);
 vector<Output_Node> output_nodes(NUMBER_OF_OUTPUT_CELLS);
 
-sem_t mutex_readInput, mutex_readyImg, mutex_outputLayerReady, mutex_readyHiddenNodes;
+sem_t mutex_readInput, mutex_readyImg;
 sem_t mutex_calcResReady, mutex_readyOutputNodes;
 sem_t mutex_inputLayerConsole, mutex_resultLayerConsole;
-vector<sem_t> mutex_noronsCalc;
+sem_t *mutex_readyHiddenNodes, *mutex_outputLayerReady;
 int errCount = 0;// number of incorrect predictions
 MNIST_Label lbl;
 FILE *labelFile;
@@ -423,33 +423,40 @@ void* readPixelsTestNN(void*){
     displayImageFrame(7,5);
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
-        sem_wait(&mutex_readInput); 
-        sem_wait(&mutex_inputLayerConsole); 
+        //wait for hidden cells to calc result based on prev image
+        for(int i = 0; i < 8; ++i)
+            sem_wait(&mutex_readInput); 
         
-        // display progress
-        displayLoadingProgressTesting(imgCount,5,5);
         // Reading next image and corresponding label
         img = getImage(imageFile);
+        
+        // display progress so first get the console mutex
+        sem_wait(&mutex_inputLayerConsole); 
+        displayLoadingProgressTesting(imgCount,5,5);
         displayImage(&img, 8,6);
-
-        sem_post(&mutex_readyImg);
         sem_post(&mutex_resultLayerConsole); 
+        
+        //increment mutext for the hidden cells for number of hidden cells time
+        for(int i = 0; i < 8; ++i)
+            sem_post(&mutex_readyImg);       
     }
     // Close files
     fclose(imageFile);
 }
 
-void* noronsCalcTestNN(void* arg){
-    // int initialIndex = (int)arg;
+void* hiddenCellsCalcTestNN(void* arg){
+    int* threadNum = (int*)arg;
 
     // Loop through all images in the file
-    // for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
-    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){    
-        sem_wait(&mutex_outputLayerReady);
+    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){  
+        //wait for all 10 output cells to finish their process  
+        for(int i = 0; i < 10; ++i)
+            sem_wait(&mutex_outputLayerReady[*threadNum]);
+        //check wheather the new image is ready
         sem_wait(&mutex_readyImg);
         
-        // loop through all output cells for the given image        
-        for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
+        // loop through all output cells of the given image this thread is responsible for        
+        for (int j = (*threadNum) * (NUMBER_OF_HIDDEN_CELLS/8); j <  ((*threadNum) + 1) * (NUMBER_OF_HIDDEN_CELLS/8); j++) {
             hidden_nodes[j].output = 0;
             for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
                 hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
@@ -457,26 +464,29 @@ void* noronsCalcTestNN(void* arg){
             hidden_nodes[j].output += hidden_nodes[j].bias;
             hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
         }
-        sem_post(&mutex_readyHiddenNodes);
+        for(int i = 0; i < 10; ++i){
+            sem_post(&mutex_readyHiddenNodes[i]);}
         sem_post(&mutex_readInput);
     }
 }
 
-void* outputLayerTestNN(void*){
+void* outputLayerTestNN(void* arg){
+    int* number = (int*)arg;
+
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
-        sem_wait(&mutex_readyHiddenNodes);
-        sem_wait(&mutex_calcResReady);
         
-        for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
-            output_nodes[i].output = 0;
-            for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
-                output_nodes[i].output += hidden_nodes[j].output * output_nodes[i].weights[j];
-            }
-            output_nodes[i].output += 1/(1+ exp(-1* output_nodes[i].output));
-        }
+        for(int i = 0; i < 8; ++i)        
+           sem_wait(&mutex_readyHiddenNodes[*number]);
+        sem_wait(&mutex_calcResReady);
 
-        sem_post(&mutex_outputLayerReady);
+        output_nodes[*number].output = 0;
+        for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
+            output_nodes[*number].output += hidden_nodes[j].output * output_nodes[*number].weights[j];     
+            output_nodes[*number].output += 1/(1+ exp(-1* output_nodes[*number].output));
+        }
+        for(int i = 0; i < 8; ++i)        
+            sem_post(&mutex_outputLayerReady[i]);
         sem_post(&mutex_readyOutputNodes);
     }
 }
@@ -486,9 +496,9 @@ void* calcResultTestNN(void*){
 
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
-        sem_wait(&mutex_readyOutputNodes);       
+        for(int i = 0; i < 10; ++i)
+            sem_wait(&mutex_readyOutputNodes);       
         sem_wait(&mutex_resultLayerConsole);
-
         lbl = getLabel(labelFile);
         int predictedNum = getNNPrediction();
         if (predictedNum!=lbl) errCount++;
@@ -496,53 +506,60 @@ void* calcResultTestNN(void*){
        
         printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
 
+        
         displayProgress(imgCount, errCount, 5, 66);
-    
-        sem_post(&mutex_calcResReady);
+
+        for(int i = 0; i < 10; ++i)    
+           sem_post(&mutex_calcResReady);
         sem_post(&mutex_inputLayerConsole);
+
     }
     // Close files
     fclose(labelFile);
 }
 
 void testNN(){
-    sem_init(&mutex_readInput, 0, 1);
+    sem_init(&mutex_readInput, 0, 8);
     sem_init(&mutex_readyImg, 0, 0);
-    sem_init(&mutex_outputLayerReady, 0, 1);
-    sem_init(&mutex_readyHiddenNodes, 0, 0);
-    sem_init(&mutex_calcResReady, 0, 1);
+    for(int i = 0; i < 8; ++i)
+        sem_init(&mutex_outputLayerReady[i], 0, 10);
+    for(int i = 0; i < 10; ++i)
+        sem_init(&mutex_readyHiddenNodes[i], 0, 0);
+    sem_init(&mutex_calcResReady, 0, 10);
     sem_init(&mutex_readyOutputNodes, 0, 0);
 
     sem_init(&mutex_inputLayerConsole, 0, 1);
     sem_init(&mutex_resultLayerConsole, 0, 0);
-
+    
     // pthread_t readPixelsThread, noronsCalcThread, outputThread, calcResThread;
     pthread_t newThread;
     vector<pthread_t> threads; 
     //pthread_t noronsCalcThreads[8];    
     int temp = 0;
+    int* index1 = (int*)malloc(8 * sizeof(int));
+    int* index2 = (int*)malloc(10 * sizeof(int));
 
     pthread_create (&newThread, NULL, readPixelsTestNN, (void*)temp);
     threads.push_back(newThread);
-    pthread_create (&newThread, NULL, noronsCalcTestNN, (void*)temp);
-    threads.push_back(newThread);
-    pthread_create (&newThread, NULL, outputLayerTestNN, (void*)temp);
-    threads.push_back(newThread);
+    
+    for(int i = 0; i < 8; i++ ) {
+        index1[i] = i;
+        pthread_create(&newThread, NULL, hiddenCellsCalcTestNN, (void *)(index1 + i));
+        threads.push_back(newThread);
+    }
+    for(int i = 0; i < 10; i++ ) {
+        index2[i] = i;
+        pthread_create(&newThread, NULL, outputLayerTestNN, (void *)(index2 + i));
+        threads.push_back(newThread);
+    }
     pthread_create (&newThread, NULL, calcResultTestNN, (void*)temp);
     threads.push_back(newThread);
 
-    // for(int i = 0; i < 8; i++ ) 
-    //     pthread_create(&noronsCalcThreads[i], NULL, noronCalcTestNN, (void *)i );
+
     for( int i = 0; i< threads.size(); ++i)
         pthread_join(threads[i], NULL);
 
-    // pthread_join(readPixelsThread, NULL);
-    // pthread_join(noronsCalcThread, NULL);
-    // pthread_join(outputThread, NULL);
-    // pthread_join(calcResThread, NULL);
-
-    // for(int i = 0; i < 8; i++ ) 
-    //     pthread_join(noronsCalcThreads[i], NULL);
+   
 
 }
 int main(int argc, const char * argv[]) {
@@ -550,6 +567,9 @@ int main(int argc, const char * argv[]) {
     // remember the time in order to calculate processing time at the end
     time_t startTime = time(NULL);
 
+    mutex_readyHiddenNodes = (sem_t*) malloc(10 * sizeof(sem_t));
+    mutex_outputLayerReady = (sem_t*) malloc(8 * sizeof(sem_t));
+    
     // clear screen of terminal window
     clearScreen();
     printf("    MNIST-NN: a simple 2-layer neural network processing the MNIST handwriting images\n");
