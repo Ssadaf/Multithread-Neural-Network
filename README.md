@@ -1,1 +1,1 @@
-# Multithread-Nural-Network
+# Multithread-Neural-Network
